@@ -1,0 +1,6 @@
+# tokens and local config never belong in the repo
+*.token
+.config/
+node_modules/
+*.log
+.DS_Store
