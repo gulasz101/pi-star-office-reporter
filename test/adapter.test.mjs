@@ -243,6 +243,25 @@ test("session_end is reported once even when shutdown and dispose both run", asy
   assert.equal(ends.length, 1);
 });
 
+test("signal handlers are removed after session_shutdown, so session replacement cannot leak them", async () => {
+  const on = [];
+  const off = [];
+  const signals = {
+    on: (name, handler) => on.push([name, handler]),
+    off: (name, handler) => off.push([name, handler]),
+  };
+  const pi = mockPi();
+  const config = { ...loadConfig({}, { readFile: () => null }), agent: "pi" };
+  createExtension(pi, { config, token: TOKEN, fetch: mockFetch(), logger: () => {}, signals });
+  assert.deepEqual(on.map(([name]) => name).sort(), ["SIGINT", "SIGTERM"]);
+
+  await pi.emit("session_start", { reason: "startup" }, mockCtx());
+  await pi.emit("session_shutdown", { reason: "new" }, mockCtx());
+
+  assert.deepEqual(off.map(([name]) => name).sort(), ["SIGINT", "SIGTERM"]);
+  for (const [, handler] of off) assert.ok(on.some(([, registered]) => registered === handler));
+});
+
 test("the default export is the Pi factory and registers handlers", () => {
   assert.equal(typeof piStarOfficeReporter, "function");
   const pi = mockPi();

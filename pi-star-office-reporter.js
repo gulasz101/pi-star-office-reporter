@@ -659,22 +659,20 @@ export function createExtension(pi, inject = {}) {
     })
   );
 
-  // Pi awaits this handler, so the last event of a run actually leaves the
-  // process before it exits. Errors are swallowed: cleanup must be idempotent
-  // and must never fail a shutdown.
-  on("session_shutdown", async (event) => {
-    try {
-      await reportEnd(event?.reason ?? "shutdown");
-      await reporter.flush(Math.min(config.timeoutMs, 2000));
-    } catch {
-      /* reporting must not break the host */
-    }
-  });
-
   // Safety nets for the paths where Pi exits without a session_shutdown:
   // `pi -p` finishes and the process ends, or the run is killed.
   const signals = inject.signals ?? (typeof process !== "undefined" ? process : null);
   const signalHandlers = [];
+  const removeSignalHandlers = () => {
+    for (const [name, handler] of signalHandlers) {
+      try {
+        signals?.off?.(name, handler);
+      } catch {
+        /* ignore */
+      }
+    }
+    signalHandlers.length = 0;
+  };
   const onSignal = (name) => {
     const handler = () => {
       try {
@@ -694,6 +692,24 @@ export function createExtension(pi, inject = {}) {
     for (const name of ["SIGINT", "SIGTERM"]) onSignal(name);
   }
 
+  // Pi awaits this handler, so the last event of a run actually leaves the
+  // process before it exits. Errors are swallowed: cleanup must be idempotent
+  // and must never fail a shutdown.
+  on("session_shutdown", async (event) => {
+    try {
+      await reportEnd(event?.reason ?? "shutdown");
+      await reporter.flush(Math.min(config.timeoutMs, 2000));
+    } catch {
+      /* reporting must not break the host */
+    } finally {
+      removeSignalHandlers();
+    }
+  });
+
+  // Pi re-runs the factory for every session replacement (/new, /resume, fork)
+  // and ignores the factory's return value, so dispose() is a test-only path.
+  // Remove the process signal listeners here or every replacement leaks one
+  // pair of handlers on the long-lived process.
   const dispose = async () => {
     if (state.disposed) return;
     state.disposed = true;
@@ -704,13 +720,7 @@ export function createExtension(pi, inject = {}) {
         /* ignore */
       }
     }
-    for (const [name, handler] of signalHandlers) {
-      try {
-        signals?.off?.(name, handler);
-      } catch {
-        /* ignore */
-      }
-    }
+    removeSignalHandlers();
     await reportEnd("extension_unload");
     await reporter.flush(Math.min(config.timeoutMs, 2000));
   };
