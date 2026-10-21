@@ -158,3 +158,15 @@ test("classifyTool: file-edit and command classes, read tools are neither", () =
     assert.equal(cls.command, false, tool);
   }
 });
+
+test("redaction: the configured token is scrubbed even when it appears bare", () => {
+  const token = "bareTokenValue0123456789abcdefghijkl";
+  const config = { ...loadConfig({}, { readFile: () => null }), agent: "pi", token };
+  const env = buildEnvelope(config, "command_run", {
+    command: `curl -H "Authorization: Bearer ${token}" http://x`,
+    label: `echo ${token}`,
+  });
+  const text = JSON.stringify(env);
+  assert.ok(!text.includes(token), "the token must never reach a payload");
+  assert.match(text, /\[redacted\]/);
+});

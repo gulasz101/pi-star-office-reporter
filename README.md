@@ -17,7 +17,7 @@ Every event is one
 
 | `event_type`      | when                                            | `payload` fields                                   |
 |-------------------|-------------------------------------------------|----------------------------------------------------|
-| `session_start`   | a Pi session starts (startup/reload/new/resume/fork) | `cwd` (basename), `source` (mode), `session_file`, `reason`, `model`, `engine` |
+| `session_start`   | a Pi session starts (startup/reload/new/resume/fork) | `cwd` (basename), `source` (mode), `reason`, `model`, `engine` |
 | `tool_call`       | every tool execution, success **or** error      | `tool`, `status`, `duration_ms`, `error` (on failure) |
 | `file_edit`       | write/edit/patch-class tools                    | `tool`, `file` (basename), `status`, `duration_ms` |
 | `command_run`     | bash/shell-class tools                          | `command`, `cwd` (basename), `status`, `exit_code`, `duration_ms` |
@@ -30,6 +30,13 @@ Payloads are **labels, not content**: basenames instead of paths, a command stri
 dashboard's ingester reduces it to `program + one allow-listed subcommand`), no prompts, no
 tool output, no session ids. The dashboard decides pixel positions and toasts; this reporter
 just keeps the event stream honest.
+
+The keys above are what the reporter sends. A Star Office UI dashboard stores only its own
+allow-list (`backend/sanitize.py`): `session_start` keeps `cwd`/`source`, `session_end` keeps
+`reason`, and the work types keep `tool`, `status`, `duration_ms`, `exit_code`, `command`,
+`file` / `cwd` (basenames), `label` and `task_id`. Everything else in those payloads
+(`model`, `engine`, `error`, `parent id` keys) is a label the dashboard drops, not a leak —
+the reporter sends them so a different consumer can still make sense of the stream.
 
 Pi has no separate background-task concept, so `background_start`/`background_end` map the
 one thing that is a sub-task in Pi: a **nested tool call** (`parentToolCallId`, e.g. a
@@ -101,7 +108,9 @@ With `debug: true` (or `SOU_DEBUG=1`) every reporter line is also appended to
 ## Privacy
 
 - The token is read from a file, sent only as `Authorization: Bearer …`, and **never**
-  appears in a payload, a log line or an error message.
+  appears in a payload, a log line or an error message: every occurrence of the resolved
+  token value is scrubbed from payloads even when it appears bare (no `Bearer`, no
+  secret-named key).
 - Secret-shaped values are redacted before anything leaves the process: bearer/basic
   credentials, `sk-…`/`rk-…`/`pk-…` keys, GitHub tokens (`ghp_`, `github_pat_`), AWS
   `AKIA…`, Slack `xox…`, JWTs, and any `key: value`/`key=value` pair whose key looks
@@ -118,7 +127,9 @@ The reporter can never cost you a run:
 
 - every hook is wrapped — a reporter bug cannot throw into Pi (a throwing `tool_call`
   handler would block the tool);
-- POSTs are fire-and-forget with an abort timeout; nothing awaits the network in a hook;
+- POSTs are fire-and-forget with an abort timeout; tool and session hooks never await the
+  network. Only `session_shutdown` waits, on a 1.2 s deadline, so a dashboard that accepts
+  the socket and never answers cannot hold the process open;
 - an unreachable dashboard, a wrong URL or a rejected token costs **one** stderr line per
   run (`further failures this run are counted, not logged`), and the run finishes normally;
 - no token configured → the reporter disables itself with one explaining line and sends

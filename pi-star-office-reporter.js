@@ -31,10 +31,13 @@
 //   SOU_REPORTER_CONFIG path to a JSON config file
 //   SOU_DEBUG=1         also append reporter log lines to a file
 //
-// Privacy: secret-shaped values and secret-named keys are redacted, long
-// strings truncated, and the payload kept under the dashboard's 65536-byte cap.
-// Non-blocking: handlers never await the network, and no failure — bad config,
-// missing token, unreachable dashboard — can throw into Pi or stop a run.
+// Privacy: secret-shaped values, secret-named keys and the resolved token are
+// redacted, long strings truncated, and the payload kept under the dashboard's
+// 65536-byte cap.
+// Non-blocking: tool and session hooks never await the network. Only
+// `session_shutdown` waits, and only for SHUTDOWN_BUDGET_MS, so a hung
+// dashboard cannot delay exit. No failure — bad config, missing token,
+// unreachable dashboard — can throw into Pi or stop a run.
 
 import { readFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -250,9 +253,28 @@ function redactWalk(node, maxFieldChars, depth) {
 }
 
 /**
- * Privacy pass: redact secret-shaped values and secret-named keys, truncate
- * long strings, and keep the serialized payload within config.maxPayloadBytes
- * so POST /events never 400s on size.
+ * Remove every occurrence of the configured ingest token from a JSON-safe
+ * value: the token may appear bare (no `Bearer`, no secret-named key), and a
+ * leaked token is worse than a lost label.
+ */
+function scrubTokenDeep(value, token) {
+  const needle = typeof token === "string" ? token.trim() : "";
+  if (!needle) return value;
+  if (typeof value === "string") return value.split(needle).join("[redacted]");
+  if (Array.isArray(value)) return value.map((item) => scrubTokenDeep(item, needle));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) out[key] = scrubTokenDeep(item, needle);
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Privacy pass: redact secret-shaped values and secret-named keys, scrub the
+ * configured token wherever it appears, truncate long strings, and keep the
+ * serialized payload within config.maxPayloadBytes so POST /events never 400s
+ * on size.
  */
 export function redactPayload(payload, config = {}) {
   const maxField = config.maxFieldChars ?? DEFAULTS.maxFieldChars;
@@ -273,7 +295,7 @@ export function redactPayload(payload, config = {}) {
   if (Buffer.byteLength(JSON.stringify(out), "utf8") > cap) {
     out = { truncated: true, note: "payload exceeded reporter size cap" };
   }
-  return out;
+  return scrubTokenDeep(out, config.token);
 }
 
 function shrinkStrings(node, limit) {
@@ -497,11 +519,18 @@ export function createExtension(pi, inject = {}) {
   const edits = new Set(); // files touched since the last code_completion
   const state = { disposed: false, sessionEnded: false, reasoned: null };
 
-  const elapsedSeconds = () => Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-  const loggedSoFar = () => {
-    const s = reporter.stats();
-    return s.sent + s.failed + s.dropped;
-  };
+  // Exit must not wait on a slow dashboard: Pi awaits `session_shutdown`, and a
+  // host that accepts the socket but never answers would otherwise hold the
+  // process for the full request timeout.
+  const SHUTDOWN_BUDGET_MS = 1200;
+  const withDeadline = (promise, ms) =>
+    Promise.race([
+      Promise.resolve(promise).catch(() => false),
+      new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(false), ms);
+        if (timer && typeof timer.unref === "function") timer.unref();
+      }),
+    ]);
 
   // Payloads use the dashboard's ingest allow-list keys (backend/sanitize.py):
   // free text, session ids and full paths are dropped server-side anyway, so
@@ -515,27 +544,16 @@ export function createExtension(pi, inject = {}) {
     edits.clear();
   };
 
-  const reportEnd = (reason, ctx) => {
+  const reportEnd = (reason) => {
     if (state.sessionEnded) return Promise.resolve(false);
     state.sessionEnded = true;
     flushCompletion();
-    const result = reporter.report(
+    // `status` describes what actually reached the dashboard this run, not how
+    // many events we tried to send.
+    return reporter.report(
       "session_end",
-      compact({
-        reason,
-        status: loggedSoFar() > 0 ? "ok" : "empty",
-      })
+      compact({ reason, status: reporter.stats().sent > 0 ? "ok" : "empty" })
     );
-    return result;
-  };
-
-  const sessionFile = (ctx) => {
-    try {
-      const file = ctx?.sessionManager?.getSessionFile?.();
-      return typeof file === "string" ? path.basename(file) : undefined;
-    } catch {
-      return undefined;
-    }
   };
 
   // Never let a handler throw into Pi: a reporter failure must not cost a tool
@@ -578,7 +596,6 @@ export function createExtension(pi, inject = {}) {
           cwd: label(ctx?.cwd),
           source: safeMode(ctx),
           reason: event.reason,
-          session_file: sessionFile(ctx),
           model: safeModel(ctx),
           engine: "pi",
         })
@@ -620,7 +637,9 @@ export function createExtension(pi, inject = {}) {
         })
       );
 
-      if (cls.fileEdit) {
+      // Only a write that landed is an edit: a failed edit must not draw an
+      // "editing <file>" bubble or feed code_completion.
+      if (cls.fileEdit && !event.isError) {
         const file = label(pickPath(args));
         if (file) edits.add(file);
         void reporter.report("file_edit", compact({ tool, file, status, duration_ms: durationMs }));
@@ -697,8 +716,10 @@ export function createExtension(pi, inject = {}) {
   // and must never fail a shutdown.
   on("session_shutdown", async (event) => {
     try {
-      await reportEnd(event?.reason ?? "shutdown");
-      await reporter.flush(Math.min(config.timeoutMs, 2000));
+      // Bounded: a dashboard that accepts the socket and never answers must not
+      // hold the exit for the full request timeout.
+      await withDeadline(reportEnd(event?.reason ?? "shutdown"), SHUTDOWN_BUDGET_MS);
+      await withDeadline(reporter.flush(Math.min(config.timeoutMs, 2000)), SHUTDOWN_BUDGET_MS);
     } catch {
       /* reporting must not break the host */
     } finally {

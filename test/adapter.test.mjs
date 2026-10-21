@@ -276,3 +276,32 @@ test("the default export is the Pi factory and registers handlers", () => {
     assert.ok(pi.handlers.has(event), `missing handler for ${event}`);
   }
 });
+
+test("a failed write is not an edit: no file_edit, no code_completion", async () => {
+  const { pi, ctx, events } = harness();
+  await pi.emit("session_start", { reason: "startup" }, ctx);
+  await pi.emit("tool_execution_start", { toolCallId: "e1", toolName: "write", args: { path: "/tmp/x/note.txt" } }, ctx);
+  await pi.emit(
+    "tool_execution_end",
+    { toolCallId: "e1", toolName: "write", result: { error: "EACCES" }, isError: true, durationMs: 4 },
+    ctx
+  );
+  await pi.emit("agent_settled", { aborted: false }, ctx);
+
+  const types = events().map((e) => e.event_type);
+  assert.ok(types.includes("tool_call"), types.join(","));
+  assert.ok(!types.includes("file_edit"), `failed write must not report an edit: ${types.join(",")}`);
+  assert.ok(!types.includes("code_completion"), "no completion without a landed edit");
+  assert.equal(events().find((e) => e.event_type === "tool_call").payload.status, "error");
+});
+
+test("shutdown does not wait on a dashboard that accepts and never answers", async () => {
+  const hanging = () => new Promise(() => {}); // accepts, never resolves
+  const { pi, ctx, ext } = harness({ fetch: hanging });
+  await pi.emit("session_start", { reason: "startup" }, ctx);
+  const t0 = Date.now();
+  await pi.emit("session_shutdown", { reason: "quit" }, ctx);
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 3000, `shutdown took ${elapsed}ms`);
+  assert.ok(ext.state.sessionEnded);
+});
