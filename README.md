@@ -24,7 +24,7 @@ Every event is one
 | `code_completion` | a run settled after editing files               | `status`, `kind`, `duration_ms`                    |
 | `background_start`| a nested tool call started (a sub-task of another tool) | `tool`, `task_id` (parent call id)         |
 | `background_end`  | … and finished                                  | `tool`, `task_id`, `status`, `duration_ms`         |
-| `session_end`     | session shutdown, SIGINT/SIGTERM, extension unload | `reason`, `status`                              |
+| `session_end`     | session shutdown: quit, SIGTERM/SIGHUP, /new, /resume, fork | `reason`, `status`                     |
 
 Payloads are **labels, not content**: basenames instead of paths, a command string (the
 dashboard's ingester reduces it to `program + one allow-listed subcommand`), no prompts, no

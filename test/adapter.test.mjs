@@ -63,7 +63,6 @@ function harness({ env = {}, fetch, respond, token = TOKEN } = {}) {
     token,
     fetch: fetchImpl,
     logger: (msg, level = "warn") => logs.push({ msg, level }),
-    handleSignals: false,
   });
   return { pi, ext, logs, fetch: fetchImpl, ctx: mockCtx(), events: () => fetchImpl.calls.map((c) => c.body) };
 }
@@ -243,23 +242,20 @@ test("session_end is reported once even when shutdown and dispose both run", asy
   assert.equal(ends.length, 1);
 });
 
-test("signal handlers are removed after session_shutdown, so session replacement cannot leak them", async () => {
-  const on = [];
-  const off = [];
-  const signals = {
-    on: (name, handler) => on.push([name, handler]),
-    off: (name, handler) => off.push([name, handler]),
-  };
+test("registers no process signal listeners: Pi owns SIGINT/SIGTERM/SIGHUP", async () => {
+  // Any SIGINT listener replaces Node's default exit, and print/json/rpc Pi has
+  // none of its own: one here makes Ctrl+C stop killing `pi -p`. Pi emits
+  // session_shutdown on SIGTERM/SIGHUP itself, so the reporter needs none.
+  const names = ["SIGINT", "SIGTERM", "SIGHUP"];
+  const before = names.map((name) => process.listenerCount(name));
   const pi = mockPi();
   const config = { ...loadConfig({}, { readFile: () => null }), agent: "pi" };
-  createExtension(pi, { config, token: TOKEN, fetch: mockFetch(), logger: () => {}, signals });
-  assert.deepEqual(on.map(([name]) => name).sort(), ["SIGINT", "SIGTERM"]);
-
+  const ext = createExtension(pi, { config, token: TOKEN, fetch: mockFetch(), logger: () => {} });
   await pi.emit("session_start", { reason: "startup" }, mockCtx());
-  await pi.emit("session_shutdown", { reason: "new" }, mockCtx());
-
-  assert.deepEqual(off.map(([name]) => name).sort(), ["SIGINT", "SIGTERM"]);
-  for (const [, handler] of off) assert.ok(on.some(([, registered]) => registered === handler));
+  assert.deepEqual(names.map((name) => process.listenerCount(name)), before);
+  await pi.emit("session_shutdown", { reason: "quit" }, mockCtx());
+  await ext.dispose();
+  assert.deepEqual(names.map((name) => process.listenerCount(name)), before);
 });
 
 test("the default export is the Pi factory and registers handlers", () => {
@@ -270,7 +266,6 @@ test("the default export is the Pi factory and registers handlers", () => {
     token: TOKEN,
     fetch: mockFetch(),
     logger: () => {},
-    handleSignals: false,
   });
   for (const event of ["session_start", "tool_execution_start", "tool_execution_end", "agent_settled", "session_shutdown"]) {
     assert.ok(pi.handlers.has(event), `missing handler for ${event}`);

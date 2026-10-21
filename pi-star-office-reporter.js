@@ -20,7 +20,7 @@
 //   code_completion    a run settled after editing files
 //   background_start   a nested tool call (a sub-task of another tool) started
 //   background_end     ... and finished
-//   session_end        session shutdown, or SIGINT/SIGTERM/process exit
+//   session_end        session shutdown (quit, SIGTERM/SIGHUP, /new, /resume, fork)
 //
 // Configuration, precedence env > config file > defaults:
 //   SOU_DASHBOARD_URL   default http://127.0.0.1:19000
@@ -678,38 +678,12 @@ export function createExtension(pi, inject = {}) {
     })
   );
 
-  // Safety nets for the paths where Pi exits without a session_shutdown:
-  // `pi -p` finishes and the process ends, or the run is killed.
-  const signals = inject.signals ?? (typeof process !== "undefined" ? process : null);
-  const signalHandlers = [];
-  const removeSignalHandlers = () => {
-    for (const [name, handler] of signalHandlers) {
-      try {
-        signals?.off?.(name, handler);
-      } catch {
-        /* ignore */
-      }
-    }
-    signalHandlers.length = 0;
-  };
-  const onSignal = (name) => {
-    const handler = () => {
-      try {
-        void reportEnd(name.toLowerCase());
-      } catch {
-        /* exiting */
-      }
-    };
-    try {
-      signals?.on?.(name, handler);
-      signalHandlers.push([name, handler]);
-    } catch {
-      /* no signal access */
-    }
-  };
-  if (inject.handleSignals !== false) {
-    for (const name of ["SIGINT", "SIGTERM"]) onSignal(name);
-  }
+  // No process signal listeners, on purpose. Pi 1.3 already turns SIGTERM and
+  // SIGHUP into `session_shutdown` in every mode (print, json, rpc,
+  // interactive), and so does a normal `pi -p` exit. A SIGINT listener here
+  // would be the only one in print/json/rpc mode, and any listener replaces
+  // Node's default exit: Ctrl+C would stop killing a headless run, and the
+  // dashboard would get a session_end while Pi kept working.
 
   // Pi awaits this handler, so the last event of a run actually leaves the
   // process before it exits. Errors are swallowed: cleanup must be idempotent
@@ -722,15 +696,11 @@ export function createExtension(pi, inject = {}) {
       await withDeadline(reporter.flush(Math.min(config.timeoutMs, 2000)), SHUTDOWN_BUDGET_MS);
     } catch {
       /* reporting must not break the host */
-    } finally {
-      removeSignalHandlers();
     }
   });
 
   // Pi re-runs the factory for every session replacement (/new, /resume, fork)
   // and ignores the factory's return value, so dispose() is a test-only path.
-  // Remove the process signal listeners here or every replacement leaks one
-  // pair of handlers on the long-lived process.
   const dispose = async () => {
     if (state.disposed) return;
     state.disposed = true;
@@ -741,7 +711,6 @@ export function createExtension(pi, inject = {}) {
         /* ignore */
       }
     }
-    removeSignalHandlers();
     await reportEnd("extension_unload");
     await reporter.flush(Math.min(config.timeoutMs, 2000));
   };
