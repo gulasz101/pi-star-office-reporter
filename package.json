@@ -1,0 +1,34 @@
+{
+  "name": "pi-star-office-reporter",
+  "version": "1.0.0",
+  "description": "Pi extension that reports agent activity (sessions, tool calls, edits, commands, completions) to a Star Office UI dashboard via ADR-035 schema-v1 events. Zero dependencies, non-blocking, credentials redacted.",
+  "type": "module",
+  "main": "./pi-star-office-reporter.js",
+  "exports": {
+    ".": "./pi-star-office-reporter.js"
+  },
+  "files": [
+    "pi-star-office-reporter.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "star-office-ui",
+    "agent-dashboard",
+    "events"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gulasz101/pi-star-office-reporter.git"
+  },
+  "scripts": {
+    "test": "node --test test/reporter.test.mjs test/adapter.test.mjs"
+  }
+}
